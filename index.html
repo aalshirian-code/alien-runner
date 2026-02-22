@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alien Runner</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+  }
+  #gameContainer {
+    position: relative;
+    width: 900px;
+    height: 400px;
+    border: 3px solid #00ff88;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 0 30px rgba(0, 255, 136, 0.3);
+  }
+  canvas { display: block; }
+  #ui {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    display: flex;
+    justify-content: space-between;
+    color: #00ff88;
+    font-size: 16px;
+    text-shadow: 0 0 10px rgba(0, 255, 136, 0.8);
+    pointer-events: none;
+    z-index: 10;
+  }
+  #progressBar {
+    position: absolute;
+    bottom: 10px;
+    left: 50px;
+    right: 50px;
+    height: 8px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 4px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  #progressFill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #00ff88, #00ccff);
+    border-radius: 4px;
+    transition: width 0.3s;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(10, 10, 46, 0.85);
+    z-index: 20;
+    color: #00ff88;
+    text-align: center;
+  }
+  #overlay h1 { font-size: 42px; margin-bottom: 10px; text-shadow: 0 0 20px #00ff88; }
+  #overlay p { font-size: 16px; margin-bottom: 6px; color: #88ffcc; }
+  #overlay .key { color: #fff; background: #224; padding: 2px 8px; border-radius: 4px; border: 1px solid #00ff88; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="gameContainer">
+  <canvas id="game" width="900" height="400"></canvas>
+  <div id="ui">
+    <span id="score">Score: 0</span>
+    <span id="lives">Lives: 3</span>
+    <span id="distance">0m / 1000m</span>
+  </div>
+  <div id="progressBar"><div id="progressFill"></div></div>
+  <div id="overlay">
+    <h1>Alien Runner</h1>
+    <p>Help Zix the alien reach the mothership!</p>
+    <p style="margin-top:12px"><span class="key">SPACE</span> or <span class="key">UP</span> to Jump</p>
+    <p><span class="key">DOWN</span> to Slide</p>
+    <p style="margin-top:16px; color:#00ff88; font-size:20px;">Press SPACE to Start</p>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 900, H = 400;
+const GROUND_Y = 320;
+
+// Game state
+let state = 'menu'; // menu, playing, dead, win
+let score = 0;
+let lives = 3;
+let distance = 0;
+const TARGET_DISTANCE = 1000;
+let speed = 4;
+let frameCount = 0;
+let shakeTimer = 0;
+
+// Stars
+const stars = Array.from({length: 80}, () => ({
+  x: Math.random() * W,
+  y: Math.random() * (GROUND_Y - 40),
+  size: Math.random() * 2 + 0.5,
+  speed: Math.random() * 0.5 + 0.2,
+  twinkle: Math.random() * Math.PI * 2
+}));
+
+// Mountains (parallax)
+const mountains = Array.from({length: 6}, (_, i) => ({
+  x: i * 200,
+  h: Math.random() * 60 + 40,
+  w: Math.random() * 80 + 120
+}));
+
+// Alien player
+const alien = {
+  x: 80, y: GROUND_Y, w: 36, h: 48,
+  vy: 0, grounded: true, sliding: false,
+  jumpPower: -12, gravity: 0.55,
+  animFrame: 0, animTimer: 0,
+  invincible: 0,
+
+  update() {
+    // Gravity
+    this.vy += this.gravity;
+    this.y += this.vy;
+    if (this.y >= GROUND_Y) {
+      this.y = GROUND_Y;
+      this.vy = 0;
+      this.grounded = true;
+    } else {
+      this.grounded = false;
+    }
+    // Animation
+    this.animTimer++;
+    if (this.animTimer > 6) { this.animTimer = 0; this.animFrame = (this.animFrame + 1) % 4; }
+    if (this.invincible > 0) this.invincible--;
+    // Hitbox shrinks when sliding
+    if (this.sliding && this.grounded) {
+      this.h = 28;
+    } else {
+      this.h = 48;
+      this.sliding = false;
+    }
+  },
+
+  jump() {
+    if (this.grounded) {
+      this.vy = this.jumpPower;
+      this.grounded = false;
+    }
+  },
+
+  draw() {
+    if (this.invincible > 0 && Math.floor(this.invincible / 3) % 2 === 0) return;
+    const x = this.x, bottomY = this.y;
+    ctx.save();
+
+    if (this.sliding) {
+      // Sliding alien (compact)
+      ctx.translate(x + 18, bottomY - 14);
+      // Body
+      ctx.fillStyle = '#44ee66';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 22, 12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Eye
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.ellipse(10, -5, 5, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff3366';
+      ctx.beginPath();
+      ctx.arc(12, -5, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      const bobY = this.grounded ? Math.sin(this.animFrame * Math.PI / 2) * 3 : 0;
+      ctx.translate(x + 18, bottomY - 24 + bobY);
+
+      // Legs
+      const legAnim = this.grounded ? Math.sin(this.animFrame * Math.PI / 2) * 6 : 4;
+      ctx.strokeStyle = '#44ee66';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(-6, 18); ctx.lineTo(-6 - legAnim, 26);
+      ctx.moveTo(6, 18); ctx.lineTo(6 + legAnim, 26);
+      ctx.stroke();
+
+      // Body
+      ctx.fillStyle = '#44ee66';
+      ctx.beginPath();
+      ctx.ellipse(0, 6, 14, 16, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Head
+      ctx.fillStyle = '#55ff77';
+      ctx.beginPath();
+      ctx.ellipse(0, -10, 16, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Antennae
+      ctx.strokeStyle = '#88ffaa';
+      ctx.lineWidth = 2;
+      const antBob = Math.sin(frameCount * 0.1) * 3;
+      ctx.beginPath();
+      ctx.moveTo(-6, -20); ctx.quadraticCurveTo(-10, -34 + antBob, -8, -36 + antBob);
+      ctx.moveTo(6, -20); ctx.quadraticCurveTo(10, -34 - antBob, 8, -36 - antBob);
+      ctx.stroke();
+      ctx.fillStyle = '#00ffcc';
+      ctx.beginPath();
+      ctx.arc(-8, -36 + antBob, 3, 0, Math.PI * 2);
+      ctx.arc(8, -36 - antBob, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Eyes
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.ellipse(-6, -12, 5, 7, 0, 0, Math.PI * 2);
+      ctx.ellipse(6, -12, 5, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff3366';
+      ctx.beginPath();
+      ctx.arc(-4, -12, 2.5, 0, Math.PI * 2);
+      ctx.arc(8, -12, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Mouth
+      ctx.strokeStyle = '#228844';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, -4, 4, 0.1 * Math.PI, 0.9 * Math.PI);
+      ctx.stroke();
+
+      // Arms
+      const armAnim = Math.sin(this.animFrame * Math.PI / 2) * 8;
+      ctx.strokeStyle = '#44ee66';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-14, 4); ctx.lineTo(-22, 8 - armAnim);
+      ctx.moveTo(14, 4); ctx.lineTo(22, 8 + armAnim);
+      ctx.stroke();
+    }
+    ctx.restore();
+  },
+
+  getHitbox() {
+    if (this.sliding) {
+      return { x: this.x + 2, y: this.y - 26, w: 34, h: 26 };
+    }
+    return { x: this.x + 4, y: this.y - 46, w: 28, h: 44 };
+  }
+};
+
+// Obstacles
+let obstacles = [];
+const obstacleTypes = [
+  { name: 'rock', w: 30, h: 30, ground: true },
+  { name: 'crate', w: 35, h: 40, ground: true },
+  { name: 'spike', w: 26, h: 35, ground: true },
+  { name: 'drone', w: 34, h: 20, ground: false, flyY: 260 },
+  { name: 'tallrock', w: 25, h: 55, ground: true },
+];
+
+function spawnObstacle() {
+  const type = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)];
+  const ob = { ...type, x: W + 20 };
+  ob.y = type.ground ? GROUND_Y : type.flyY + Math.random() * 30;
+  obstacles.push(ob);
+}
+
+function drawObstacle(ob) {
+  const bx = ob.x, by = ob.y;
+  ctx.save();
+  if (ob.name === 'rock') {
+    ctx.fillStyle = '#665577';
+    ctx.beginPath();
+    ctx.moveTo(bx, by); ctx.lineTo(bx + 8, by - 28);
+    ctx.lineTo(bx + 22, by - 25); ctx.lineTo(bx + 30, by);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#554466';
+    ctx.beginPath();
+    ctx.moveTo(bx + 5, by - 10); ctx.lineTo(bx + 12, by - 20);
+    ctx.lineTo(bx + 20, by - 16); ctx.closePath(); ctx.fill();
+  } else if (ob.name === 'crate') {
+    ctx.fillStyle = '#886633';
+    ctx.fillRect(bx, by - ob.h, ob.w, ob.h);
+    ctx.strokeStyle = '#aa8844';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx + 2, by - ob.h + 2, ob.w - 4, ob.h - 4);
+    ctx.beginPath();
+    ctx.moveTo(bx, by - ob.h); ctx.lineTo(bx + ob.w, by);
+    ctx.moveTo(bx + ob.w, by - ob.h); ctx.lineTo(bx, by);
+    ctx.stroke();
+  } else if (ob.name === 'spike') {
+    ctx.fillStyle = '#cc3344';
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(bx + i * 9, by);
+      ctx.lineTo(bx + i * 9 + 5, by - 35);
+      ctx.lineTo(bx + i * 9 + 10, by);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = '#ff5566';
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(bx + i * 9 + 3, by - 10);
+      ctx.lineTo(bx + i * 9 + 5, by - 35);
+      ctx.lineTo(bx + i * 9 + 7, by - 10);
+      ctx.closePath(); ctx.fill();
+    }
+  } else if (ob.name === 'drone') {
+    // Flying drone — must slide under
+    const hover = Math.sin(frameCount * 0.08 + ob.x) * 5;
+    const dy = ob.y + hover;
+    ctx.fillStyle = '#ff4488';
+    ctx.beginPath();
+    ctx.ellipse(bx + 17, dy - 10, 17, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ff6699';
+    ctx.fillRect(bx + 2, dy - 18, 30, 4);
+    ctx.fillStyle = '#ffaacc';
+    ctx.beginPath();
+    ctx.arc(bx + 17, dy - 12, 4, 0, Math.PI * 2);
+    ctx.fill();
+    // Update hitbox y for hover
+    ob._drawY = dy;
+  } else if (ob.name === 'tallrock') {
+    ctx.fillStyle = '#556688';
+    ctx.beginPath();
+    ctx.moveTo(bx, by); ctx.lineTo(bx + 4, by - 55);
+    ctx.lineTo(bx + 12, by - 52); ctx.lineTo(bx + 20, by - 55);
+    ctx.lineTo(bx + 25, by);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#667799';
+    ctx.beginPath();
+    ctx.moveTo(bx + 8, by - 30); ctx.lineTo(bx + 12, by - 52);
+    ctx.lineTo(bx + 18, by - 40); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function getObstacleHitbox(ob) {
+  if (ob.name === 'drone') {
+    const hover = ob._drawY !== undefined ? ob._drawY : ob.y;
+    return { x: ob.x + 2, y: hover - 18, w: 30, h: 16 };
+  }
+  return { x: ob.x + 3, y: ob.y - ob.h + 3, w: ob.w - 6, h: ob.h - 6 };
+}
+
+// Particles
+let particles = [];
+function emitParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y, vx: (Math.random() - 0.5) * 6, vy: (Math.random() - 1) * 5,
+      life: 30 + Math.random() * 20, maxLife: 50, size: Math.random() * 4 + 2, color
+    });
+  }
+}
+
+// Collectibles (bonus score)
+let collectibles = [];
+function spawnCollectible() {
+  collectibles.push({
+    x: W + 20,
+    y: GROUND_Y - 60 - Math.random() * 80,
+    size: 10, collected: false,
+    bob: Math.random() * Math.PI * 2
+  });
+}
+
+// Mothership (end goal)
+let mothership = { visible: false, x: W + 100 };
+
+// Input
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if ((e.code === 'Space' || e.code === 'ArrowUp') && state === 'menu') {
+    startGame();
+    e.preventDefault();
+  }
+  if (e.code === 'Space' && (state === 'dead' || state === 'win')) {
+    resetGame();
+    startGame();
+    e.preventDefault();
+  }
+  if ((e.code === 'Space' || e.code === 'ArrowUp') && state === 'playing') {
+    alien.jump();
+    e.preventDefault();
+  }
+  if (e.code === 'ArrowDown' && state === 'playing') {
+    alien.sliding = true;
+    e.preventDefault();
+  }
+});
+document.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'ArrowDown') alien.sliding = false;
+});
+
+function resetGame() {
+  score = 0;
+  lives = 3;
+  distance = 0;
+  speed = 4;
+  obstacles = [];
+  collectibles = [];
+  particles = [];
+  alien.y = GROUND_Y;
+  alien.vy = 0;
+  alien.grounded = true;
+  alien.sliding = false;
+  alien.invincible = 0;
+  mothership.visible = false;
+  mothership.x = W + 100;
+}
+
+function startGame() {
+  state = 'playing';
+  document.getElementById('overlay').classList.add('hidden');
+}
+
+function hitPlayer() {
+  if (alien.invincible > 0) return;
+  lives--;
+  shakeTimer = 12;
+  emitParticles(alien.x + 18, alien.y - 20, '#ff3366', 15);
+  alien.invincible = 90;
+  if (lives <= 0) {
+    state = 'dead';
+    showOverlay('Game Over', `You traveled ${Math.floor(distance)}m with ${score} points`, 'Press SPACE to Retry');
+  }
+}
+
+function showOverlay(title, sub, action) {
+  const ov = document.getElementById('overlay');
+  ov.classList.remove('hidden');
+  ov.innerHTML = `<h1>${title}</h1><p>${sub}</p><p style="margin-top:16px;font-size:20px;color:#00ff88">${action}</p>`;
+}
+
+// Collision detection
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+let spawnTimer = 0;
+let collectTimer = 0;
+
+function update() {
+  if (state !== 'playing') return;
+  frameCount++;
+
+  // Increase speed over time
+  speed = 4 + distance * 0.003;
+  if (speed > 9) speed = 9;
+
+  distance += speed * 0.06;
+
+  // Spawn obstacles
+  spawnTimer -= speed;
+  if (spawnTimer <= 0) {
+    spawnObstacle();
+    spawnTimer = 120 + Math.random() * 180 - distance * 0.08;
+    if (spawnTimer < 70) spawnTimer = 70;
+  }
+
+  // Spawn collectibles
+  collectTimer -= speed;
+  if (collectTimer <= 0) {
+    spawnCollectible();
+    collectTimer = 200 + Math.random() * 150;
+  }
+
+  // Update alien
+  alien.update();
+
+  // Update obstacles
+  const aHit = alien.getHitbox();
+  obstacles = obstacles.filter(ob => {
+    ob.x -= speed;
+    if (ob.x + ob.w < -20) { score += 10; return false; }
+    // Collision
+    const obHit = getObstacleHitbox(ob);
+    if (rectsOverlap(aHit, obHit)) hitPlayer();
+    return true;
+  });
+
+  // Update collectibles
+  collectibles = collectibles.filter(c => {
+    c.x -= speed;
+    if (c.x < -20) return false;
+    c.bob += 0.06;
+    if (!c.collected) {
+      const cx = c.x, cy = c.y + Math.sin(c.bob) * 6;
+      const cHit = { x: cx - 8, y: cy - 8, w: 16, h: 16 };
+      if (rectsOverlap(aHit, cHit)) {
+        c.collected = true;
+        score += 25;
+        emitParticles(cx, cy, '#ffcc00', 8);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // Update particles
+  particles = particles.filter(p => {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.life--;
+    return p.life > 0;
+  });
+
+  // Stars parallax
+  stars.forEach(s => {
+    s.x -= s.speed * speed * 0.3;
+    if (s.x < 0) s.x = W;
+    s.twinkle += 0.03;
+  });
+
+  // Mountains parallax
+  mountains.forEach(m => {
+    m.x -= speed * 0.3;
+    if (m.x + m.w < 0) m.x = W + Math.random() * 100;
+  });
+
+  // Shake
+  if (shakeTimer > 0) shakeTimer--;
+
+  // Win condition
+  if (distance >= TARGET_DISTANCE && !mothership.visible) {
+    mothership.visible = true;
+    mothership.x = W + 50;
+    // Stop spawning
+    spawnTimer = 99999;
+  }
+  if (mothership.visible) {
+    mothership.x -= speed * 0.5;
+    if (mothership.x <= 300) {
+      mothership.x = 300;
+      // Beam up the alien
+      if (alien.x < 320) alien.x += 1;
+      if (alien.x >= 310) {
+        alien.y -= 2;
+        if (alien.y < 60) {
+          state = 'win';
+          score += 500;
+          emitParticles(340, 100, '#00ffcc', 30);
+          showOverlay('You Win!', `Zix reached the mothership! Score: ${score}`, 'Press SPACE to Play Again');
+        }
+      }
+    }
+  }
+
+  // UI updates
+  document.getElementById('score').textContent = `Score: ${score}`;
+  document.getElementById('lives').textContent = `Lives: ${'♥'.repeat(lives)}`;
+  document.getElementById('distance').textContent = `${Math.floor(distance)}m / ${TARGET_DISTANCE}m`;
+  document.getElementById('progressFill').style.width = `${Math.min(100, (distance / TARGET_DISTANCE) * 100)}%`;
+}
+
+function draw() {
+  ctx.save();
+  // Screen shake
+  if (shakeTimer > 0) {
+    ctx.translate(Math.random() * 6 - 3, Math.random() * 6 - 3);
+  }
+
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0a0a2e');
+  grad.addColorStop(0.7, '#1a1044');
+  grad.addColorStop(1, '#2a1855');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  stars.forEach(s => {
+    const alpha = 0.5 + Math.sin(s.twinkle) * 0.4;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Mountains
+  ctx.fillStyle = '#1a1040';
+  mountains.forEach(m => {
+    ctx.beginPath();
+    ctx.moveTo(m.x, GROUND_Y);
+    ctx.lineTo(m.x + m.w / 2, GROUND_Y - m.h);
+    ctx.lineTo(m.x + m.w, GROUND_Y);
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  // Ground
+  ctx.fillStyle = '#2d1f4e';
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.strokeStyle = '#44ffaa';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y); ctx.lineTo(W, GROUND_Y);
+  ctx.stroke();
+  // Ground details
+  ctx.strokeStyle = 'rgba(68, 255, 170, 0.15)';
+  for (let i = 0; i < W; i += 30) {
+    const offset = (frameCount * speed * 0.5 + i) % (W + 60) - 30;
+    ctx.beginPath();
+    ctx.moveTo(offset, GROUND_Y + 8);
+    ctx.lineTo(offset + 15, GROUND_Y + 8);
+    ctx.stroke();
+  }
+
+  // Mothership
+  if (mothership.visible) {
+    const mx = mothership.x;
+    // Beam
+    ctx.fillStyle = 'rgba(0, 255, 200, 0.12)';
+    ctx.beginPath();
+    ctx.moveTo(mx - 10, 50);
+    ctx.lineTo(mx - 40, GROUND_Y);
+    ctx.lineTo(mx + 60, GROUND_Y);
+    ctx.lineTo(mx + 30, 50);
+    ctx.closePath();
+    ctx.fill();
+    // Ship body
+    ctx.fillStyle = '#336688';
+    ctx.beginPath();
+    ctx.ellipse(mx + 10, 45, 55, 18, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#447799';
+    ctx.beginPath();
+    ctx.ellipse(mx + 10, 35, 30, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Lights
+    for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = `hsl(${(frameCount * 3 + i * 60) % 360}, 100%, 70%)`;
+      ctx.beginPath();
+      ctx.arc(mx - 30 + i * 18, 50, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Obstacles
+  obstacles.forEach(drawObstacle);
+
+  // Collectibles
+  collectibles.forEach(c => {
+    const cy = c.y + Math.sin(c.bob) * 6;
+    ctx.fillStyle = '#ffcc00';
+    ctx.shadowColor = '#ffcc00';
+    ctx.shadowBlur = 10;
+    // Star shape
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) {
+      const angle = (i * 4 * Math.PI / 5) - Math.PI / 2;
+      const r = i === 0 ? 0 : undefined;
+      const px = c.x + Math.cos(angle) * 10;
+      const py = cy + Math.sin(angle) * 10;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+      const inner = angle + (2 * Math.PI / 5) / 2;
+      ctx.lineTo(c.x + Math.cos(inner) * 4, cy + Math.sin(inner) * 4);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  });
+
+  // Alien
+  alien.draw();
+
+  // Particles
+  particles.forEach(p => {
+    const alpha = p.life / p.maxLife;
+    ctx.fillStyle = p.color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.restore();
+}
+
+function gameLoop() {
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>
